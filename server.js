@@ -1,12 +1,34 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+// Endpoint de salud
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+app.get('/', (req, res) => {
+  res.json({ 
+    message: '🚀 Nivin Scraper funcionando',
+    endpoints: ['/api/stream', '/health']
+  });
+});
+
+// Health check (opcional pero recomendado)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: Date.now() });
+});
+
+// Tu endpoint principal
+app.get('/api/stream', async (req, res) => {
+  // ... todo tu código existente ...
+});
 
 // Mapeo de fuentes a URLs base
 const SOURCES = {
@@ -70,16 +92,16 @@ app.get('/api/stream', async (req, res) => {
 
   try {
     const browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu'
-      ]
-    });
-    const page = await browser.newPage();
+  	executablePath: '/usr/bin/chromium-browser', // Ruta típica en entornos Linux
+ 	 headless: 'new',
+ 	 args: [
+ 	   '--no-sandbox',
+ 	   '--disable-setuid-sandbox',
+  	  '--disable-dev-shm-usage',
+  	  '--disable-gpu'
+  	]
+	});   
+	const page = await browser.newPage();
 
     // Configurar headers para parecer un navegador real
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -146,28 +168,6 @@ app.get('/api/stream', async (req, res) => {
     console.error('Error en scraping:', error);
     res.status(500).json({ error: 'Error al procesar la solicitud', details: error.message });
   }
-});
-
-// Endpoint de salud
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-app.get('/', (req, res) => {
-  res.json({ 
-    message: '🚀 Nivin Scraper funcionando',
-    endpoints: ['/api/stream', '/health']
-  });
-});
-
-// Health check (opcional pero recomendado)
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: Date.now() });
-});
-
-// Tu endpoint principal
-app.get('/api/stream', async (req, res) => {
-  // ... todo tu código existente ...
 });
 
 app.listen(PORT, () => {
