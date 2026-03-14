@@ -4,8 +4,8 @@
   "description": "Servidor scraper para obtener streams de video",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+	 "start": "node server.js",
+ 	 "postinstall": "puppeteer browsers install chrome"    
   },
   "dependencies": {
   	"express": "^4.18.2",
