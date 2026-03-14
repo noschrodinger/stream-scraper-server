@@ -5,17 +5,14 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Configuración
-const TMDB_API_KEY = process.env.TMDB_API_KEY || 'TU_API_KEY_DE_TMDB'; // Pon tu key en Render como variable de entorno
-
 app.use(cors());
 app.use(express.json());
 
-// ================= FUNCIÓN AUXILIAR: Obtener IMDb ID desde TMDB =================
+// ================= OBTENER IMDb ID DESDE TMDB =================
 async function getImdbId(tmdbId, type) {
   const apiKey = process.env.TMDB_API_KEY;
   if (!apiKey) {
-    console.error('❌ TMDB_API_KEY no está definida en las variables de entorno');
+    console.error('❌ TMDB_API_KEY no está definida');
     return null;
   }
   try {
@@ -23,137 +20,110 @@ async function getImdbId(tmdbId, type) {
     console.log('📡 Consultando TMDB:', url);
     const { data } = await axios.get(url, { timeout: 5000 });
     console.log('📦 Respuesta TMDB:', data);
-    if (data && data.imdb_id) {
-      return data.imdb_id;
-    } else {
-      console.warn(`⚠️ TMDB no devolvió imdb_id para ${type} ${tmdbId}`);
-      return null;
-    }
+    return data?.imdb_id || null;
   } catch (error) {
     console.error('🔥 Error en TMDB:', error.response?.data || error.message);
     return null;
   }
 }
 
-// ================= FUNCIÓN AUXILIAR: Consultar un addon de Stremio =================
+// ================= CONSULTAR ADDON =================
 async function fetchFromAddon(addonUrl, type, imdbId, season, episode) {
   try {
-    // Construir el ID compuesto si es serie
     let fullId = imdbId;
     if (type === 'tv' && season && episode) {
       fullId = `${imdbId}:${season}:${episode}`;
     }
-
     const url = `${addonUrl}/stream/${type === 'movie' ? 'movie' : 'series'}/${fullId}.json`;
-    const { data } = await axios.get(url, { timeout: 8000 }); // Timeout 8 segundos por addon
-
-    // Si el addon devuelve streams en data.streams
-    if (data && Array.isArray(data.streams)) {
-      return data.streams;
-    }
-    return [];
+    console.log(`🌐 Consultando addon: ${url}`);
+    const { data } = await axios.get(url, { timeout: 8000 });
+    return data?.streams || [];
   } catch (error) {
-    console.error(`Error consultando addon ${addonUrl}:`, error.message);
-    return []; // Fallo silencioso
+    console.error(`⚠️ Error en addon ${addonUrl}:`, error.message);
+    return [];
   }
 }
 
-// ================= FILTRADO POR IDIOMA LATINO =================
+// ================= FILTRAR LATINO =================
 function filterLatino(streams) {
   const keywords = ['latino', 'spanish', 'español', 'pp', 'pelisplus'];
   return streams.filter(stream => {
     const title = (stream.title || '').toLowerCase();
     const description = (stream.description || '').toLowerCase();
-    return keywords.some(keyword => title.includes(keyword) || description.includes(keyword));
+    return keywords.some(k => title.includes(k) || description.includes(k));
   });
 }
 
-// ================= EXTRACTOR DE URL Y HEADERS =================
+// ================= EXTRAER INFO =================
 function extractStreamInfo(stream) {
-  let url = stream.url;
-  let headers = {};
-
-  // Si el addon provee headers en behaviorHints
-  if (stream.behaviorHints && stream.behaviorHints.headers) {
-    headers = stream.behaviorHints.headers;
-  } else {
-    // Headers por defecto para evitar bloqueos
-    headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Referer': 'https://torrentio.strem.fun/'
-    };
-  }
-
-  return { url, title: stream.title, headers };
+  const headers = stream.behaviorHints?.headers || {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Referer': 'https://torrentio.strem.fun/'
+  };
+  return {
+    url: stream.url,
+    title: stream.title,
+    headers
+  };
 }
 
 // ================= ENDPOINT PRINCIPAL =================
 app.get('/api/stream', async (req, res) => {
   const { id, type, season, episode } = req.query;
 
-  // Validaciones básicas
   if (!id || !type) {
     return res.status(400).json({ error: 'Faltan parámetros: id, type' });
   }
 
-  console.log(`🔍 Procesando: ${type} ${id} S${season || ''}E${episode || ''}`);
+  console.log(`🔍 Recibido: ${type} ${id} S${season || ''}E${episode || ''}`);
 
   try {
-    // 1. Obtener IMDb ID desde TMDB
+    // 1. Obtener IMDb ID
     const imdbId = await getImdbId(id, type);
     if (!imdbId) {
       return res.status(404).json({ error: 'No se pudo obtener IMDb ID desde TMDB' });
     }
-    console.log(`✅ IMDb ID: ${imdbId}`);
+    console.log('✅ IMDb ID:', imdbId);
 
-    // 2. Lista de addons a consultar (añade más según encuentres)
+    // 2. Addons a consultar
     const addons = [
-      'https://torrentio.strem.fun',          // Torrentio (verificado)
-      'https://superflixapi.strem.fun',       // SuperFlix (asumo dominio, verifica)
-      // Puedes añadir más aquí, ej: 'https://pobreflix.strem.fun'
+      'https://torrentio.strem.fun',
+      // 'https://superflixapi.strem.fun', // descomenta si sabes que funciona
     ];
 
-    // 3. Consultar todos los addons en paralelo
+    // 3. Consultar en paralelo
     const results = await Promise.allSettled(
-      addons.map(addon => fetchFromAddon(addon, type, imdbId, season, episode))
+      addons.map(a => fetchFromAddon(a, type, imdbId, season, episode))
     );
 
-    // 4. Combinar todos los streams
+    // 4. Unir streams
     let allStreams = [];
-    results.forEach(result => {
-      if (result.status === 'fulfilled' && result.value.length > 0) {
-        allStreams = allStreams.concat(result.value);
-      }
+    results.forEach(r => {
+      if (r.status === 'fulfilled') allStreams.push(...r.value);
     });
 
     if (allStreams.length === 0) {
-      return res.status(404).json({ error: 'No se encontraron streams en ningún addon' });
+      return res.status(404).json({ error: 'No se encontraron streams' });
     }
 
-    // 5. Filtrar por idioma latino
-    const latinoStreams = filterLatino(allStreams);
+    // 5. Filtrar latino
+    const latino = filterLatino(allStreams);
+    const selected = latino.length > 0 ? latino[0] : allStreams[0];
 
-    // Si hay streams latinos, usar el primero; si no, usar el primero disponible
-    const selectedStream = latinoStreams.length > 0 ? latinoStreams[0] : allStreams[0];
-
-    // 6. Extraer información para el reproductor
-    const streamInfo = extractStreamInfo(selectedStream);
-
-    console.log(`✅ Stream encontrado: ${streamInfo.title || 'sin título'}`);
+    // 6. Responder
+    const streamInfo = extractStreamInfo(selected);
+    console.log('✅ Stream listo:', streamInfo.title);
     res.json(streamInfo);
 
   } catch (error) {
     console.error('🔥 Error general:', error.message);
-    res.status(500).json({ error: 'Error interno del servidor', details: error.message });
+    res.status(500).json({ error: 'Error interno', details: error.message });
   }
 });
 
-// Rutas básicas
+// ================= RUTAS =================
 app.get('/', (req, res) => {
-  res.json({
-    message: '🚀 Stremio Addon Resolver para Nivin',
-    endpoints: ['/api/stream', '/health']
-  });
+  res.json({ message: '🚀 Stremio Resolver para Nivin', endpoints: ['/api/stream', '/health'] });
 });
 
 app.get('/health', (req, res) => {
@@ -161,5 +131,5 @@ app.get('/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor en http://localhost:${PORT}`);
 });
