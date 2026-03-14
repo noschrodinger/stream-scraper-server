@@ -1,7 +1,7 @@
 const express = require('express');
+const axios = require('axios');
+const cheerio = require('cheerio');
 const cors = require('cors');
-const chromium = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -9,56 +9,76 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Rutas básicas
-app.get('/', (req, res) => {
-  res.json({ 
-    message: '🚀 Nivin Scraper (Español Latino)',
-    endpoints: ['/api/stream', '/health']
-  });
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: Date.now() });
-});
-
-// ================= NUEVAS FUENTES EN ESPAÑOL LATINO =================
+// ================= CONFIGURACIÓN DE FUENTES =================
+// Cada fuente define:
+// - name: nombre descriptivo
+// - urlBuilder: función que construye la URL de la página a scrapear (recibe id, season, episode)
+// - extractor: función que recibe el HTML y devuelve la URL del stream (o null)
 const SOURCES = {
   cuevana: {
     name: 'Cuevana 3 (Latino)',
-    movie: (id) => `https://cuevana3.nu/pelicula/${id}`,
-    tv: (id, season, episode) => `https://cuevana3.nu/serie/${id}/${season}/${episode}`
+    urlBuilder: (id, type, season, episode) => {
+      if (type === 'movie') return `https://cuevana3.nu/pelicula/${id}`;
+      else return `https://cuevana3.nu/serie/${id}/${season}/${episode}`;
+    },
+    extractor: ($) => {
+      // Buscar iframe con clase TPlayer (típico de Cuevana)
+      const iframeSrc = $('iframe.TPlayer').attr('src');
+      if (!iframeSrc) return null;
+
+      // Extraer parámetro showEmbed
+      const match = iframeSrc.match(/showEmbed=([^&]+)/);
+      if (!match) return null;
+
+      // Decodificar Base64
+      const base64Code = match[1];
+      const decodedUrl = Buffer.from(base64Code, 'base64').toString('utf-8');
+      return decodedUrl;
+    }
   },
-  gnula: {
-    name: 'Gnula (Latino)',
-    movie: (id) => `https://gnula.nu/pelicula/${id}`,
-    tv: (id, season, episode) => `https://gnula.nu/serie/${id}/${season}/${episode}`
-  },
-  repelis: {
-    name: 'Repelis (Latino)',
-    movie: (id) => `https://repelis24.co/pelicula/${id}`,
-    tv: (id, season, episode) => `https://repelis24.co/serie/${id}/${season}/${episode}`
-  },
-  hdfull: {
-    name: 'HDFull (Latino)',
-    movie: (id) => `https://hdfull.lat/pelicula/${id}`,
-    tv: (id, season, episode) => `https://hdfull.lat/serie/${id}/${season}/${episode}`
-  }
+  // Puedes agregar más fuentes con sus propios extractores
+  // ej: gnula, repelis, etc.
 };
 
-// Cache simple (1 hora)
+// Cache simple (opcional, para no repetir peticiones)
 const cache = new Map();
-const CACHE_TTL = 3600000;
+const CACHE_TTL = 3600000; // 1 hora
 
-// Endpoint principal de stream
+// ================= ENDPOINT PRINCIPAL =================
 app.get('/api/stream', async (req, res) => {
-  console.log('🔍 Request params:', req.query);
-  
   const { source, id, type, season, episode } = req.query;
 
+  // Validaciones básicas
   if (!source || !id || !type) {
     return res.status(400).json({ error: 'Faltan parámetros: source, id, type' });
   }
 
+  const sourceConfig = SOURCES[source];
+  if (!sourceConfig) {
+    return res.status(400).json({
+      error: `Fuente '${source}' no válida`,
+      availableSources: Object.keys(SOURCES)
+    });
+  }
+
+  // Construir URL según el tipo
+  let url;
+  try {
+    if (type === 'movie') {
+      url = sourceConfig.urlBuilder(id, type);
+    } else if (type === 'tv') {
+      if (!season || !episode) {
+        return res.status(400).json({ error: 'Para TV se requieren season y episode' });
+      }
+      url = sourceConfig.urlBuilder(id, type, season, episode);
+    } else {
+      return res.status(400).json({ error: "type debe ser 'movie' o 'tv'" });
+    }
+  } catch (error) {
+    return res.status(400).json({ error: 'Error construyendo URL', details: error.message });
+  }
+
+  // Verificar caché
   const cacheKey = `${source}-${id}-${type}-${season || ''}-${episode || ''}`;
   if (cache.has(cacheKey)) {
     const cached = cache.get(cacheKey);
@@ -68,147 +88,63 @@ app.get('/api/stream', async (req, res) => {
     }
   }
 
-  const sourceConfig = SOURCES[source];
-  if (!sourceConfig) {
-    return res.status(400).json({ 
-      error: `Fuente '${source}' no válida`,
-      availableSources: Object.keys(SOURCES)
-    });
-  }
-
-  // Construir URL
-  let url;
-  try {
-    if (type === 'movie') {
-      url = sourceConfig.movie(id);
-    } else if (type === 'tv') {
-      if (!season || !episode) {
-        return res.status(400).json({ error: 'Para TV se requieren season y episode' });
-      }
-      url = sourceConfig.tv(id, season, episode);
-    } else {
-      return res.status(400).json({ error: "type debe ser 'movie' o 'tv'" });
-    }
-  } catch (error) {
-    return res.status(400).json({ error: 'Error construyendo URL', details: error.message });
-  }
-
   console.log(`🌐 Scraping ${source} - ${url}`);
 
-  let browser = null;
-  let page = null;
-  let streamUrl = null;
-  let timeoutId = null;
-
   try {
-    browser = await puppeteer.launch({
-      args: [
-        ...chromium.args,
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding',
-        '--disable-web-security',
-        '--disable-features=IsolateOrigins,site-per-process'
-      ],
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-      ignoreHTTPSErrors: true,
+    // 1. Obtener HTML con Axios (ligero, sin navegador)
+    const { data: html } = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': new URL(url).origin,
+        'Accept-Language': 'es-ES,es;q=0.9'
+      },
+      timeout: 10000 // 10 segundos máximo
     });
 
-    page = await browser.newPage();
+    // 2. Cargar HTML en Cheerio
+    const $ = cheerio.load(html);
 
-    // Interceptar requests para bloquear recursos pesados
-    await page.setRequestInterception(true);
-    page.on('request', (request) => {
-      const resourceType = request.resourceType();
-      const reqUrl = request.url();
+    // 3. Ejecutar el extractor específico de la fuente
+    const streamUrl = sourceConfig.extractor($);
 
-      // Detectar stream inmediatamente
-      if (reqUrl.includes('.m3u8') || reqUrl.includes('.mp4') || reqUrl.includes('master.m3u8')) {
-        streamUrl = reqUrl;
-        console.log('🎬 Stream detectado:', reqUrl);
-        request.abort();
-        if (timeoutId) clearTimeout(timeoutId);
-        (async () => {
-          await page.close().catch(() => {});
-          await browser.close().catch(() => {});
-        })();
-        return;
-      }
-
-      // Bloquear recursos no esenciales
-      const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'other'];
-      if (blockedTypes.includes(resourceType)) {
-        request.abort();
-        return;
-      }
-
-      // Bloquear dominios de publicidad
-      const blockedDomains = ['googleads', 'doubleclick', 'facebook', 'analytics', 'tracking'];
-      if (blockedDomains.some(domain => reqUrl.includes(domain))) {
-        request.abort();
-        return;
-      }
-
-      request.continue();
-    });
-
-    // Headers realistas
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'es-ES,es;q=0.9',
-      'Referer': new URL(url).origin,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    });
-
-    // Navegar con timeout de 30 segundos
-    await Promise.race([
-      page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }),
-      new Promise((_, reject) => 
-        timeoutId = setTimeout(() => reject(new Error('Timeout 30s')), 30000)
-      )
-    ]);
-
-    // Pequeña espera por si el stream aparece después (máx 5s)
     if (!streamUrl) {
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      return res.status(404).json({ error: 'No se encontró stream en la página' });
     }
 
-  } catch (error) {
-    console.error('🔥 Error durante scraping:', error.message);
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-    if (page) await page.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
-  }
-
-  if (streamUrl) {
+    // 4. Preparar respuesta
     const responseData = {
       url: streamUrl,
       headers: {
-        'Referer': url,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Origin': new URL(url).origin
+        'Referer': new URL(url).origin,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     };
-    cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
-    console.log('✅ Stream devuelto');
-    return res.json(responseData);
-  }
 
-  console.log('❌ No se encontró stream');
-  res.status(404).json({ error: 'No se encontró stream en la página' });
+    // Guardar en caché
+    cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
+
+    console.log('✅ Stream encontrado:', streamUrl);
+    res.json(responseData);
+
+  } catch (error) {
+    console.error('🔥 Error en scraping:', error.message);
+    res.status(500).json({ error: 'Error al procesar la solicitud', details: error.message });
+  }
 });
 
-// Ruta 404
+// Ruta raíz y health check
+app.get('/', (req, res) => {
+  res.json({
+    message: '🚀 Nivin Scraper (Axios + Cheerio)',
+    endpoints: ['/api/stream', '/health']
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: Date.now() });
+});
+
+// Manejo de rutas no encontradas
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada', path: req.originalUrl });
 });
