@@ -10,37 +10,99 @@ app.use(cors());
 app.use(express.json());
 
 // ================= CONFIGURACIÓN DE FUENTES =================
-// Cada fuente define:
-// - name: nombre descriptivo
-// - urlBuilder: función que construye la URL de la página a scrapear (recibe id, season, episode)
-// - extractor: función que recibe el HTML y devuelve la URL del stream (o null)
 const SOURCES = {
   cuevana: {
     name: 'Cuevana 3 (Latino)',
-    urlBuilder: (id, type, season, episode) => {
-      if (type === 'movie') return `https://cuevana3.nu/pelicula/${id}`;
-      else return `https://cuevana3.nu/serie/${id}/${season}/${episode}`;
+    // Ahora el urlBuilder puede recibir un ID numérico y buscar el slug real
+    urlBuilder: async (id, type, season, episode) => {
+      // Si el ID es numérico (como 550), primero buscamos el slug en el sitio
+      if (/^\d+$/.test(id)) {
+        console.log(`🔍 ID numérico detectado (${id}), buscando slug...`);
+        const slug = await resolveCuevanaSlug(id, type);
+        if (!slug) {
+          throw new Error(`No se pudo encontrar el slug para el ID ${id}`);
+        }
+        // Construir URL con el slug encontrado
+        if (type === 'movie') {
+          return `https://cuevana3.nu/${slug}`;
+        } else {
+          // Para series, asumimos que el slug es el nombre de la serie
+          return `https://cuevana3.nu/serie/${slug}/${season}/${episode}`;
+        }
+      } else {
+        // Si ya es un slug, lo usamos directamente
+        if (type === 'movie') {
+          return `https://cuevana3.nu/${id}`;
+        } else {
+          return `https://cuevana3.nu/serie/${id}/${season}/${episode}`;
+        }
+      }
     },
+    // Extractor mejorado: busca el iframe específico
     extractor: ($) => {
-      // Buscar iframe con clase TPlayer (típico de Cuevana)
-      const iframeSrc = $('iframe.TPlayer').attr('src');
+      // Buscar el contenedor principal del reproductor
+      const playerContainer = $('div.TPlayerCn');
+      if (!playerContainer.length) return null;
+
+      // Dentro del contenedor, buscar el iframe con la clase específica
+      // Puede ser .TPlayer, .embed_div, o una combinación
+      const iframe = playerContainer.find('iframe.TPlayer, iframe.embed_div').first();
+      const iframeSrc = iframe.attr('src');
+      
       if (!iframeSrc) return null;
 
-      // Extraer parámetro showEmbed
-      const match = iframeSrc.match(/showEmbed=([^&]+)/);
+      // Extraer parámetro showEmbed (puede estar como query param)
+      const match = iframeSrc.match(/[?&]showEmbed=([^&]+)/);
       if (!match) return null;
 
       // Decodificar Base64
       const base64Code = match[1];
-      const decodedUrl = Buffer.from(base64Code, 'base64').toString('utf-8');
-      return decodedUrl;
+      try {
+        const decodedUrl = Buffer.from(base64Code, 'base64').toString('utf-8');
+        return decodedUrl;
+      } catch (e) {
+        console.error('Error decodificando Base64:', e.message);
+        return null;
+      }
     }
-  },
-  // Puedes agregar más fuentes con sus propios extractores
-  // ej: gnula, repelis, etc.
+  }
+  // Aquí puedes agregar más fuentes (gnula, repelis, etc.)
 };
 
-// Cache simple (opcional, para no repetir peticiones)
+// ================= FUNCIÓN AUXILIAR: Resolver slug de Cuevana =================
+async function resolveCuevanaSlug(tmdbId, type) {
+  try {
+    // Cuevana tiene un sistema de búsqueda. Intentamos con la URL de búsqueda
+    const searchUrl = `https://cuevana3.nu/search?q=${tmdbId}`;
+    const { data: html } = await axios.get(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 5000
+    });
+
+    const $ = cheerio.load(html);
+    
+    // Buscar el primer resultado que coincida con el tipo (película/serie)
+    let selector = type === 'movie' ? 'article.item-pelicula a' : 'article.item-serie a';
+    const firstResult = $(selector).first();
+    const href = firstResult.attr('href');
+    
+    if (href) {
+      // Extraer el slug de la URL (ej: /pelicula/el-rey-leon -> el-rey-leon)
+      const slugMatch = href.match(/\/(?:pelicula|serie)\/([^\/]+)/);
+      if (slugMatch) {
+        return slugMatch[1];
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('Error en búsqueda de slug:', error.message);
+    return null;
+  }
+}
+
+// Cache simple
 const cache = new Map();
 const CACHE_TTL = 3600000; // 1 hora
 
@@ -48,7 +110,6 @@ const CACHE_TTL = 3600000; // 1 hora
 app.get('/api/stream', async (req, res) => {
   const { source, id, type, season, episode } = req.query;
 
-  // Validaciones básicas
   if (!source || !id || !type) {
     return res.status(400).json({ error: 'Faltan parámetros: source, id, type' });
   }
@@ -61,24 +122,7 @@ app.get('/api/stream', async (req, res) => {
     });
   }
 
-  // Construir URL según el tipo
-  let url;
-  try {
-    if (type === 'movie') {
-      url = sourceConfig.urlBuilder(id, type);
-    } else if (type === 'tv') {
-      if (!season || !episode) {
-        return res.status(400).json({ error: 'Para TV se requieren season y episode' });
-      }
-      url = sourceConfig.urlBuilder(id, type, season, episode);
-    } else {
-      return res.status(400).json({ error: "type debe ser 'movie' o 'tv'" });
-    }
-  } catch (error) {
-    return res.status(400).json({ error: 'Error construyendo URL', details: error.message });
-  }
-
-  // Verificar caché
+  // Construir cache key (incluye todo)
   const cacheKey = `${source}-${id}-${type}-${season || ''}-${episode || ''}`;
   if (cache.has(cacheKey)) {
     const cached = cache.get(cacheKey);
@@ -88,30 +132,32 @@ app.get('/api/stream', async (req, res) => {
     }
   }
 
-  console.log(`🌐 Scraping ${source} - ${url}`);
-
   try {
-    // 1. Obtener HTML con Axios (ligero, sin navegador)
+    // 1. Obtener la URL real (puede requerir resolución de slug)
+    const url = await sourceConfig.urlBuilder(id, type, season, episode);
+    console.log(`🌐 URL construida: ${url}`);
+
+    // 2. Obtener HTML con Axios
     const { data: html } = await axios.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': new URL(url).origin,
+        'Referer': 'https://cuevana3.nu/',
         'Accept-Language': 'es-ES,es;q=0.9'
       },
-      timeout: 10000 // 10 segundos máximo
+      timeout: 10000
     });
 
-    // 2. Cargar HTML en Cheerio
+    // 3. Cargar HTML en Cheerio
     const $ = cheerio.load(html);
 
-    // 3. Ejecutar el extractor específico de la fuente
+    // 4. Ejecutar extractor específico
     const streamUrl = sourceConfig.extractor($);
 
     if (!streamUrl) {
       return res.status(404).json({ error: 'No se encontró stream en la página' });
     }
 
-    // 4. Preparar respuesta
+    // 5. Preparar respuesta
     const responseData = {
       url: streamUrl,
       headers: {
@@ -127,26 +173,21 @@ app.get('/api/stream', async (req, res) => {
     res.json(responseData);
 
   } catch (error) {
-    console.error('🔥 Error en scraping:', error.message);
+    console.error('🔥 Error:', error.message);
     res.status(500).json({ error: 'Error al procesar la solicitud', details: error.message });
   }
 });
 
-// Ruta raíz y health check
+// Ruta raíz
 app.get('/', (req, res) => {
   res.json({
-    message: '🚀 Nivin Scraper (Axios + Cheerio)',
+    message: '🚀 Nivin Scraper (Axios + Cheerio + Resolución de slugs)',
     endpoints: ['/api/stream', '/health']
   });
 });
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: Date.now() });
-});
-
-// Manejo de rutas no encontradas
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Ruta no encontrada', path: req.originalUrl });
 });
 
 app.listen(PORT, () => {
