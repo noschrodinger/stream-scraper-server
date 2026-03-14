@@ -73,7 +73,8 @@ const SOURCES = {
 async function resolveCuevanaSlug(tmdbId, type) {
   try {
     // Cuevana tiene un sistema de búsqueda. Intentamos con la URL de búsqueda
-    const searchUrl = `https://cuevana3.nu/search?q=${tmdbId}`;
+    // En resolveCuevanaSlug, asegurate de que el query esté limpio
+    const searchUrl = `https://cuevana3.nu/search?q=${encodeURIComponent(tmdbId)}`;
     const { data: html } = await axios.get(searchUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
