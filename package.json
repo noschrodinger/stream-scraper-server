@@ -1,18 +1,17 @@
 {
   "name": "stream-scraper-server",
   "version": "1.0.0",
-  "description": "Servidor scraper para obtener streams de video",
   "main": "server.js",
   "scripts": {
-	 "start": "node server.js",
- 	 "postinstall": "puppeteer browsers install chrome"    
+    "start": "node server.js"
+    // ✅ ELIMINADO: "postinstall": "puppeteer browsers install chrome"
   },
   "dependencies": {
-  	"express": "^4.18.2",
-  	"puppeteer-core": "^21.0.0",
-  	"cors": "^2.8.5"
+    "express": "^4.18.2",
+    "puppeteer": "^21.0.0",
+    "cors": "^2.8.5"
   },
-  "devDependencies": {
+ "devDependencies": {
     "nodemon": "^3.0.1"
   }
 }
