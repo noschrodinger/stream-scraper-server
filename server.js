@@ -27,19 +27,33 @@ async function getImdbId(tmdbId, type) {
   }
 }
 
-// ================= CONSULTAR ADDON =================
-async function fetchFromAddon(addonUrl, type, imdbId, season, episode) {
+// ================= CONSULTAR TORRENTIO =================
+async function fetchFromTorrentio(type, imdbId, season, episode) {
   try {
     let fullId = imdbId;
     if (type === 'tv' && season && episode) {
       fullId = `${imdbId}:${season}:${episode}`;
     }
-    const url = `${addonUrl}/stream/${type === 'movie' ? 'movie' : 'series'}/${fullId}.json`;
-    console.log(`🌐 Consultando addon: ${url}`);
+    const url = `https://torrentio.strem.fun/stream/${type === 'movie' ? 'movie' : 'series'}/${fullId}.json`;
+    console.log('🌐 Consultando Torrentio:', url);
+
     const { data } = await axios.get(url, { timeout: 8000 });
-    return data?.streams || [];
+    console.log('📦 Respuesta Torrentio (primeros 200 chars):', JSON.stringify(data).slice(0, 200));
+
+    // Verificar estructura de la respuesta
+    if (data && Array.isArray(data.streams)) {
+      console.log(`✅ Torrentio devolvió ${data.streams.length} streams`);
+      return data.streams;
+    } else {
+      console.warn('⚠️ La respuesta de Torrentio no contiene un array "streams"');
+      return [];
+    }
   } catch (error) {
-    console.error(`⚠️ Error en addon ${addonUrl}:`, error.message);
+    console.error('🔥 Error en Torrentio:', error.message);
+    if (error.response) {
+      console.error('Status:', error.response.status);
+      console.error('Data:', error.response.data);
+    }
     return [];
   }
 }
@@ -75,7 +89,7 @@ app.get('/api/stream', async (req, res) => {
     return res.status(400).json({ error: 'Faltan parámetros: id, type' });
   }
 
-  console.log(`🔍 Recibido: ${type} ${id} S${season || ''}E${episode || ''}`);
+  console.log('🔍 Recibido:', { id, type, season, episode });
 
   try {
     // 1. Obtener IMDb ID
@@ -85,34 +99,21 @@ app.get('/api/stream', async (req, res) => {
     }
     console.log('✅ IMDb ID:', imdbId);
 
-    // 2. Addons a consultar
-    const addons = [
-      'https://torrentio.strem.fun',
-      // 'https://superflixapi.strem.fun', // descomenta si sabes que funciona
-    ];
+    // 2. Consultar Torrentio
+    const streams = await fetchFromTorrentio(type, imdbId, season, episode);
 
-    // 3. Consultar en paralelo
-    const results = await Promise.allSettled(
-      addons.map(a => fetchFromAddon(a, type, imdbId, season, episode))
-    );
-
-    // 4. Unir streams
-    let allStreams = [];
-    results.forEach(r => {
-      if (r.status === 'fulfilled') allStreams.push(...r.value);
-    });
-
-    if (allStreams.length === 0) {
+    if (streams.length === 0) {
+      console.warn('❌ No se encontraron streams en Torrentio');
       return res.status(404).json({ error: 'No se encontraron streams' });
     }
 
-    // 5. Filtrar latino
-    const latino = filterLatino(allStreams);
-    const selected = latino.length > 0 ? latino[0] : allStreams[0];
+    // 3. Filtrar latino
+    const latino = filterLatino(streams);
+    const selected = latino.length > 0 ? latino[0] : streams[0];
 
-    // 6. Responder
+    // 4. Responder
     const streamInfo = extractStreamInfo(selected);
-    console.log('✅ Stream listo:', streamInfo.title);
+    console.log('✅ Stream seleccionado:', streamInfo.title);
     res.json(streamInfo);
 
   } catch (error) {
