@@ -27,29 +27,28 @@ async function getImdbId(tmdbId, type) {
   }
 }
 
-// ================= CONSULTAR TORRENTIO =================
-async function fetchFromTorrentio(type, imdbId, season, episode) {
+// ================= CONSULTAR ADDON (ahora SuperFlix) =================
+async function fetchFromAddon(addonUrl, type, imdbId, season, episode) {
   try {
     let fullId = imdbId;
     if (type === 'tv' && season && episode) {
       fullId = `${imdbId}:${season}:${episode}`;
     }
-    const url = `https://torrentio.strem.fun/stream/${type === 'movie' ? 'movie' : 'series'}/${fullId}.json`;
-    console.log('🌐 Consultando Torrentio:', url);
+    const url = `${addonUrl}/stream/${type === 'movie' ? 'movie' : 'series'}/${fullId}.json`;
+    console.log(`🌐 Consultando addon: ${url}`);
 
     const { data } = await axios.get(url, { timeout: 8000 });
-    console.log('📦 Respuesta Torrentio (primeros 200 chars):', JSON.stringify(data).slice(0, 200));
+    console.log('📦 Respuesta del addon (primeros 200 chars):', JSON.stringify(data).slice(0, 200));
 
-    // Verificar estructura de la respuesta
     if (data && Array.isArray(data.streams)) {
-      console.log(`✅ Torrentio devolvió ${data.streams.length} streams`);
+      console.log(`✅ Addon devolvió ${data.streams.length} streams`);
       return data.streams;
     } else {
-      console.warn('⚠️ La respuesta de Torrentio no contiene un array "streams"');
+      console.warn('⚠️ La respuesta no contiene un array "streams"');
       return [];
     }
   } catch (error) {
-    console.error('🔥 Error en Torrentio:', error.message);
+    console.error('🔥 Error en addon:', error.message);
     if (error.response) {
       console.error('Status:', error.response.status);
       console.error('Data:', error.response.data);
@@ -70,9 +69,10 @@ function filterLatino(streams) {
 
 // ================= EXTRAER INFO =================
 function extractStreamInfo(stream) {
+  // Si el addon provee headers en behaviorHints, los usamos
   const headers = stream.behaviorHints?.headers || {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Referer': 'https://torrentio.strem.fun/'
+    'Referer': 'https://superflixapi.strem.fun/'
   };
   return {
     url: stream.url,
@@ -99,19 +99,36 @@ app.get('/api/stream', async (req, res) => {
     }
     console.log('✅ IMDb ID:', imdbId);
 
-    // 2. Consultar Torrentio
-    const streams = await fetchFromTorrentio(type, imdbId, season, episode);
+    // 2. Addons a consultar (SuperFlix funciona, podemos añadir más)
+    const addons = [
+      'https://superflixapi.strem.fun',   // SuperFlix (funciona sin Cloudflare)
+      // 'https://torrentio.strem.fun',   // Torrentio está bloqueado por ahora
+      // 'https://pobreflix.strem.fun',   // Si encuentras uno que funcione, añádelo
+    ];
 
-    if (streams.length === 0) {
-      console.warn('❌ No se encontraron streams en Torrentio');
+    // 3. Consultar en paralelo
+    const results = await Promise.allSettled(
+      addons.map(a => fetchFromAddon(a, type, imdbId, season, episode))
+    );
+
+    // 4. Unir todos los streams
+    let allStreams = [];
+    results.forEach(r => {
+      if (r.status === 'fulfilled') {
+        allStreams.push(...r.value);
+      }
+    });
+
+    if (allStreams.length === 0) {
+      console.warn('❌ No se encontraron streams en ningún addon');
       return res.status(404).json({ error: 'No se encontraron streams' });
     }
 
-    // 3. Filtrar latino
-    const latino = filterLatino(streams);
-    const selected = latino.length > 0 ? latino[0] : streams[0];
+    // 5. Filtrar por idioma latino
+    const latinoStreams = filterLatino(allStreams);
+    const selected = latinoStreams.length > 0 ? latinoStreams[0] : allStreams[0];
 
-    // 4. Responder
+    // 6. Extraer información para el reproductor
     const streamInfo = extractStreamInfo(selected);
     console.log('✅ Stream seleccionado:', streamInfo.title);
     res.json(streamInfo);
@@ -124,7 +141,7 @@ app.get('/api/stream', async (req, res) => {
 
 // ================= RUTAS =================
 app.get('/', (req, res) => {
-  res.json({ message: '🚀 Stremio Resolver para Nivin', endpoints: ['/api/stream', '/health'] });
+  res.json({ message: '🚀 Stremio Resolver para Nivin (con SuperFlix)', endpoints: ['/api/stream', '/health'] });
 });
 
 app.get('/health', (req, res) => {
