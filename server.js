@@ -13,12 +13,24 @@ app.use(express.json());
 
 // ================= FUNCIÓN AUXILIAR: Obtener IMDb ID desde TMDB =================
 async function getImdbId(tmdbId, type) {
+  const apiKey = process.env.TMDB_API_KEY;
+  if (!apiKey) {
+    console.error('❌ TMDB_API_KEY no está definida en las variables de entorno');
+    return null;
+  }
   try {
-    const url = `https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids?api_key=${TMDB_API_KEY}`;
+    const url = `https://api.themoviedb.org/3/${type}/${tmdbId}/external_ids?api_key=${apiKey}`;
+    console.log('📡 Consultando TMDB:', url);
     const { data } = await axios.get(url, { timeout: 5000 });
-    return data.imdb_id;
+    console.log('📦 Respuesta TMDB:', data);
+    if (data && data.imdb_id) {
+      return data.imdb_id;
+    } else {
+      console.warn(`⚠️ TMDB no devolvió imdb_id para ${type} ${tmdbId}`);
+      return null;
+    }
   } catch (error) {
-    console.error(`Error obteniendo IMDb ID para ${tmdbId}:`, error.message);
+    console.error('🔥 Error en TMDB:', error.response?.data || error.message);
     return null;
   }
 }
