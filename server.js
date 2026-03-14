@@ -12,7 +12,7 @@ app.use(express.json());
 // Rutas básicas
 app.get('/', (req, res) => {
   res.json({ 
-    message: '🚀 Nivin Scraper optimizado para Render (512MB)',
+    message: '🚀 Nivin Scraper (Español Latino)',
     endpoints: ['/api/stream', '/health']
   });
 });
@@ -21,22 +21,27 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: Date.now() });
 });
 
-// Fuentes disponibles
+// ================= NUEVAS FUENTES EN ESPAÑOL LATINO =================
 const SOURCES = {
-  flixhq: {
-    name: 'FlixHQ',
-    movie: (id) => `https://flixhq.to/movie/${id}`,
-    tv: (id, season, episode) => `https://flixhq.to/tv/${id}-${season}-${episode}`
+  cuevana: {
+    name: 'Cuevana 3 (Latino)',
+    movie: (id) => `https://cuevana3.nu/pelicula/${id}`,
+    tv: (id, season, episode) => `https://cuevana3.nu/serie/${id}/${season}/${episode}`
   },
-  sflix: {
-    name: 'SFlix',
-    movie: (id) => `https://sflix.to/movie/${id}`,
-    tv: (id, season, episode) => `https://sflix.to/tv/${id}-${season}-${episode}`
+  gnula: {
+    name: 'Gnula (Latino)',
+    movie: (id) => `https://gnula.nu/pelicula/${id}`,
+    tv: (id, season, episode) => `https://gnula.nu/serie/${id}/${season}/${episode}`
   },
-  moviebox: {
-    name: 'MovieBox',
-    movie: (id) => `https://moviebox.to/movie/${id}`,
-    tv: (id, season, episode) => `https://moviebox.to/tv/${id}-${season}-${episode}`
+  repelis: {
+    name: 'Repelis (Latino)',
+    movie: (id) => `https://repelis24.co/pelicula/${id}`,
+    tv: (id, season, episode) => `https://repelis24.co/serie/${id}/${season}/${episode}`
+  },
+  hdfull: {
+    name: 'HDFull (Latino)',
+    movie: (id) => `https://hdfull.lat/pelicula/${id}`,
+    tv: (id, season, episode) => `https://hdfull.lat/serie/${id}/${season}/${episode}`
   }
 };
 
@@ -50,7 +55,6 @@ app.get('/api/stream', async (req, res) => {
   
   const { source, id, type, season, episode } = req.query;
 
-  // Validaciones básicas
   if (!source || !id || !type) {
     return res.status(400).json({ error: 'Faltan parámetros: source, id, type' });
   }
@@ -97,22 +101,21 @@ app.get('/api/stream', async (req, res) => {
   let timeoutId = null;
 
   try {
-    // Lanzar Chromium con configuración de bajo consumo
     browser = await puppeteer.launch({
       args: [
         ...chromium.args,
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',      // Crítico para poca RAM
+        '--disable-dev-shm-usage',
         '--disable-gpu',
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',              // Reduce procesos (experimental)
+        '--single-process',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
-        '--disable-web-security',        // Opcional, a veces necesario
+        '--disable-web-security',
         '--disable-features=IsolateOrigins,site-per-process'
       ],
       defaultViewport: chromium.defaultViewport,
@@ -127,15 +130,13 @@ app.get('/api/stream', async (req, res) => {
     await page.setRequestInterception(true);
     page.on('request', (request) => {
       const resourceType = request.resourceType();
-      const url = request.url();
+      const reqUrl = request.url();
 
       // Detectar stream inmediatamente
-      if (url.includes('.m3u8') || url.includes('.mp4') || url.includes('master.m3u8')) {
-        streamUrl = url;
-        console.log('🎬 Stream detectado:', url);
-        // Cancelar todas las demás requests y cerrar pronto
-        request.abort(); // No necesitamos cargar más
-        // Forzar cierre del navegador (se hará en el cleanup)
+      if (reqUrl.includes('.m3u8') || reqUrl.includes('.mp4') || reqUrl.includes('master.m3u8')) {
+        streamUrl = reqUrl;
+        console.log('🎬 Stream detectado:', reqUrl);
+        request.abort();
         if (timeoutId) clearTimeout(timeoutId);
         (async () => {
           await page.close().catch(() => {});
@@ -151,18 +152,17 @@ app.get('/api/stream', async (req, res) => {
         return;
       }
 
-      // Bloquear dominios de terceros conocidos (publicidad)
+      // Bloquear dominios de publicidad
       const blockedDomains = ['googleads', 'doubleclick', 'facebook', 'analytics', 'tracking'];
-      if (blockedDomains.some(domain => url.includes(domain))) {
+      if (blockedDomains.some(domain => reqUrl.includes(domain))) {
         request.abort();
         return;
       }
 
-      // Permitir solo lo esencial (HTML, scripts, xhr)
       request.continue();
     });
 
-    // Configurar headers
+    // Headers realistas
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'es-ES,es;q=0.9',
       'Referer': new URL(url).origin,
@@ -171,28 +171,25 @@ app.get('/api/stream', async (req, res) => {
 
     // Navegar con timeout de 30 segundos
     await Promise.race([
-      page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }), // No esperar a networkidle para ahorrar tiempo
+      page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }),
       new Promise((_, reject) => 
         timeoutId = setTimeout(() => reject(new Error('Timeout 30s')), 30000)
       )
     ]);
 
-    // Si ya encontramos el stream en la intercepción, no necesitamos esperar más
+    // Pequeña espera por si el stream aparece después (máx 5s)
     if (!streamUrl) {
-      // Esperar un poco más por si aparece en requests tardías (máx 5s)
       await new Promise(resolve => setTimeout(resolve, 5000));
     }
 
   } catch (error) {
     console.error('🔥 Error durante scraping:', error.message);
   } finally {
-    // Limpiar timeout y cerrar navegador
     if (timeoutId) clearTimeout(timeoutId);
     if (page) await page.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
   }
 
-  // Si encontramos stream, responder y cachear
   if (streamUrl) {
     const responseData = {
       url: streamUrl,
@@ -207,16 +204,15 @@ app.get('/api/stream', async (req, res) => {
     return res.json(responseData);
   }
 
-  // No se encontró stream
   console.log('❌ No se encontró stream');
   res.status(404).json({ error: 'No se encontró stream en la página' });
 });
 
-// Manejo de rutas no encontradas
+// Ruta 404
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Ruta no encontrada', path: req.originalUrl });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor optimizado corriendo en http://localhost:${PORT}`);
+  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
 });
