@@ -153,6 +153,23 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.get('/', (req, res) => {
+  res.json({ 
+    message: '🚀 Nivin Scraper funcionando',
+    endpoints: ['/api/stream', '/health']
+  });
+});
+
+// Health check (opcional pero recomendado)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: Date.now() });
+});
+
+// Tu endpoint principal
+app.get('/api/stream', async (req, res) => {
+  // ... todo tu código existente ...
+});
+
 app.listen(PORT, () => {
   console.log(`Servidor scraper corriendo en http://localhost:${PORT}`);
 });
