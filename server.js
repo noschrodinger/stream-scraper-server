@@ -9,19 +9,19 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Ruta raíz de prueba
+// Rutas básicas
 app.get('/', (req, res) => {
   res.json({ 
-    message: '🚀 Nivin Scraper funcionando (modo optimizado)',
+    message: '🚀 Nivin Scraper optimizado para Render (512MB)',
     endpoints: ['/api/stream', '/health']
   });
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: Date.now() });
 });
 
+// Fuentes disponibles
 const SOURCES = {
   flixhq: {
     name: 'FlixHQ',
@@ -40,9 +40,9 @@ const SOURCES = {
   }
 };
 
-// Cache simple
+// Cache simple (1 hora)
 const cache = new Map();
-const CACHE_TTL = 3600000; // 1 hora
+const CACHE_TTL = 3600000;
 
 // Endpoint principal de stream
 app.get('/api/stream', async (req, res) => {
@@ -50,12 +50,11 @@ app.get('/api/stream', async (req, res) => {
   
   const { source, id, type, season, episode } = req.query;
 
-  // Validaciones
+  // Validaciones básicas
   if (!source || !id || !type) {
     return res.status(400).json({ error: 'Faltan parámetros: source, id, type' });
   }
 
-  // Verificar caché
   const cacheKey = `${source}-${id}-${type}-${season || ''}-${episode || ''}`;
   if (cache.has(cacheKey)) {
     const cached = cache.get(cacheKey);
@@ -93,17 +92,75 @@ app.get('/api/stream', async (req, res) => {
   console.log(`🌐 Scraping ${source} - ${url}`);
 
   let browser = null;
+  let page = null;
+  let streamUrl = null;
+  let timeoutId = null;
+
   try {
-    // Lanzar Chromium usando @sparticuz/chromium (optimizado para entornos serverless)
+    // Lanzar Chromium con configuración de bajo consumo
     browser = await puppeteer.launch({
-      args: chromium.args,
+      args: [
+        ...chromium.args,
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',      // Crítico para poca RAM
+        '--disable-gpu',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',              // Reduce procesos (experimental)
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-web-security',        // Opcional, a veces necesario
+        '--disable-features=IsolateOrigins,site-per-process'
+      ],
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless,
       ignoreHTTPSErrors: true,
     });
 
-    const page = await browser.newPage();
+    page = await browser.newPage();
+
+    // Interceptar requests para bloquear recursos pesados
+    await page.setRequestInterception(true);
+    page.on('request', (request) => {
+      const resourceType = request.resourceType();
+      const url = request.url();
+
+      // Detectar stream inmediatamente
+      if (url.includes('.m3u8') || url.includes('.mp4') || url.includes('master.m3u8')) {
+        streamUrl = url;
+        console.log('🎬 Stream detectado:', url);
+        // Cancelar todas las demás requests y cerrar pronto
+        request.abort(); // No necesitamos cargar más
+        // Forzar cierre del navegador (se hará en el cleanup)
+        if (timeoutId) clearTimeout(timeoutId);
+        (async () => {
+          await page.close().catch(() => {});
+          await browser.close().catch(() => {});
+        })();
+        return;
+      }
+
+      // Bloquear recursos no esenciales
+      const blockedTypes = ['image', 'stylesheet', 'font', 'media', 'other'];
+      if (blockedTypes.includes(resourceType)) {
+        request.abort();
+        return;
+      }
+
+      // Bloquear dominios de terceros conocidos (publicidad)
+      const blockedDomains = ['googleads', 'doubleclick', 'facebook', 'analytics', 'tracking'];
+      if (blockedDomains.some(domain => url.includes(domain))) {
+        request.abort();
+        return;
+      }
+
+      // Permitir solo lo esencial (HTML, scripts, xhr)
+      request.continue();
+    });
 
     // Configurar headers
     await page.setExtraHTTPHeaders({
@@ -112,74 +169,54 @@ app.get('/api/stream', async (req, res) => {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     });
 
-    // Interceptar requests para capturar .m3u8
-    let streamUrl = null;
-    await page.setRequestInterception(true);
-    
-    page.on('request', (request) => {
-      const reqUrl = request.url();
-      if (reqUrl.includes('.m3u8') || reqUrl.includes('.mp4') || reqUrl.includes('master.m3u8')) {
-        streamUrl = reqUrl;
-        console.log('🎬 Stream encontrado:', reqUrl);
-        // No cancelamos la request, solo la registramos
-      }
-      request.continue();
-    });
+    // Navegar con timeout de 30 segundos
+    await Promise.race([
+      page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }), // No esperar a networkidle para ahorrar tiempo
+      new Promise((_, reject) => 
+        timeoutId = setTimeout(() => reject(new Error('Timeout 30s')), 30000)
+      )
+    ]);
 
-    // Navegar a la página
-    console.log('⏳ Cargando página...');
-    await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
-    });
-
-    // Esperar un poco más por si el video tarda en cargar
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    if (browser) await browser.close();
-
-    if (streamUrl) {
-      const responseData = {
-        url: streamUrl,
-        headers: {
-          'Referer': url,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Origin': new URL(url).origin
-        }
-      };
-      
-      // Guardar en caché
-      cache.set(cacheKey, {
-        timestamp: Date.now(),
-        data: responseData
-      });
-
-      console.log('✅ Stream encontrado, respondiendo');
-      res.json(responseData);
-    } else {
-      console.log('❌ No se encontró stream');
-      res.status(404).json({ error: 'No se encontró stream en la página' });
+    // Si ya encontramos el stream en la intercepción, no necesitamos esperar más
+    if (!streamUrl) {
+      // Esperar un poco más por si aparece en requests tardías (máx 5s)
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
 
   } catch (error) {
-    console.error('🔥 Error en scraping:', error);
-    if (browser) await browser.close();
-    res.status(500).json({ 
-      error: 'Error al procesar la solicitud',
-      details: error.message 
-    });
+    console.error('🔥 Error durante scraping:', error.message);
+  } finally {
+    // Limpiar timeout y cerrar navegador
+    if (timeoutId) clearTimeout(timeoutId);
+    if (page) await page.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
   }
+
+  // Si encontramos stream, responder y cachear
+  if (streamUrl) {
+    const responseData = {
+      url: streamUrl,
+      headers: {
+        'Referer': url,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Origin': new URL(url).origin
+      }
+    };
+    cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
+    console.log('✅ Stream devuelto');
+    return res.json(responseData);
+  }
+
+  // No se encontró stream
+  console.log('❌ No se encontró stream');
+  res.status(404).json({ error: 'No se encontró stream en la página' });
 });
 
 // Manejo de rutas no encontradas
 app.use('*', (req, res) => {
-  res.status(404).json({ 
-    error: 'Ruta no encontrada',
-    path: req.originalUrl
-  });
+  res.status(404).json({ error: 'Ruta no encontrada', path: req.originalUrl });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor scraper corriendo en http://localhost:${PORT}`);
-  console.log(`📡 Endpoint principal: http://localhost:${PORT}/api/stream`);
+  console.log(`🚀 Servidor optimizado corriendo en http://localhost:${PORT}`);
 });
